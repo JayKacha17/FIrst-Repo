@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Wavelength Laser Hands</title>
+  <!-- MediaPipe Hands & Camera Utils -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      user-select: none;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+    body {
+      background: #000;
+      overflow: hidden;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+    }
+    #container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    /* Mirror webcam feed */
+    video {
+      transform: scaleX(-1);
+      display: none;
+    }
+    canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1);
+    }
+    /* Sci-Fi HUD Overlay */
+    .hud-card {
+      position: absolute;
+      top: 24px;
+      left: 24px;
+      background: rgba(10, 20, 30, 0.75);
+      border: 1px solid rgba(0, 255, 204, 0.4);
+      border-radius: 12px;
+      padding: 16px 20px;
+      color: #00ffcc;
+      font-size: 13px;
+      backdrop-filter: blur(8px);
+      box-shadow: 0 0 20px rgba(0, 255, 204, 0.2);
+      z-index: 10;
+      line-height: 1.6;
+    }
+    .hud-title {
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      margin-bottom: 6px;
+      border-bottom: 1px solid rgba(0, 255, 204, 0.2);
+      padding-bottom: 4px;
+    }
+    .hud-val {
+      color: #ffffff;
+      font-weight: 600;
+    }
+    /* Central Wavelength Badge */
+    #badge-container {
+      position: absolute;
+      pointer-events: none;
+      transform: translate(-50%, -50%);
+      z-index: 10;
+      display: none;
+      text-align: center;
+    }
+    .wavelength-badge {
+      background: rgba(0, 0, 0, 0.85);
+      border: 2px solid #fff;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 18px;
+      font-weight: 800;
+      color: #fff;
+      box-shadow: 0 0 15px currentColor;
+      transition: border-color 0.1s ease;
+    }
+    /* White flash screen */
+    #flash-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: white;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.1s ease-out;
+      z-index: 20;
+    }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <video id="webcam" playsinline></video>
+    <canvas id="output_canvas"></canvas>
+    
+    <!-- Top-Left HUD -->
+    <div class="hud-card">
+      <div class="hud-title">SPECTROMETER HUD</div>
+      <div>Hands Detected: <span id="hands-count" class="hud-val">0</span></div>
+      <div>FPS: <span id="fps-val" class="hud-val">0</span></div>
+      <div>Wavelength: <span id="hud-wavelength" class="hud-val">--</span></div>
+      <div>Distance: <span id="hud-distance" class="hud-val">0%</span></div>
+    </div>
+
+    <!-- Center Floating Wavelength Label -->
+    <div id="badge-container">
+      <div id="wavelength-badge" class="wavelength-badge">400 nm</div>
+    </div>
+
+    <!-- White Flash Overlay -->
+    <div id="flash-overlay"></div>
+  </div>
+
+  <script>
+    const videoElement = document.getElementById('webcam');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const badgeContainer = document.getElementById('badge-container');
+    const wavelengthBadge = document.getElementById('wavelength-badge');
+    const flashOverlay = document.getElementById('flash-overlay');
+
+    const handsCountEl = document.getElementById('hands-count');
+    const fpsValEl = document.getElementById('fps-val');
+    const hudWavelengthEl = document.getElementById('hud-wavelength');
+    const hudDistanceEl = document.getElementById('hud-distance');
+
+    let lastFrameTime = performance.now();
+    let frameCount = 0;
+    let fps = 0;
+
+    // UPDATED: Removed wrist (0) from the array. Now it only connects the 5 fingertips.
+    const CONNECT_INDICES = [4, 8, 12, 16, 20]; // Thumb, Index, Middle, Ring, Pinky
+
+    // Physical Wavelength (nm) to RGB formula
+    function wavelengthToRGB(wavelength) {
+      let r = 0, g = 0, b = 0;
+      if (wavelength >= 380 && wavelength < 440) {
+        r = -(wavelength - 440) / (440 - 380);
+        g = 0.0;
+        b = 1.0;
+      } else if (wavelength >= 440 && wavelength < 490) {
+        r = 0.0;
+        g = (wavelength - 440) / (490 - 440);
+        b = 1.0;
+      } else if (wavelength >= 490 && wavelength < 510) {
+        r = 0.0;
+        g = 1.0;
+        b = -(wavelength - 510) / (510 - 490);
+      } else if (wavelength >= 510 && wavelength < 580) {
+        r = (wavelength - 510) / (580 - 510);
+        g = 1.0;
+        b = 0.0;
+      } else if (wavelength >= 580 && wavelength < 645) {
+        r = 1.0;
+        g = -(wavelength - 645) / (645 - 580);
+        b = 0.0;
+      } else if (wavelength >= 645 && wavelength <= 750) {
+        r = 1.0;
+        g = 0.0;
+        b = 0.0;
+      }
+
+      // Intensity adjustment near spectrum edges
+      let factor = 0.0;
+      if (wavelength >= 380 && wavelength < 420) {
+        factor = 0.3 + (0.7 * (wavelength - 380)) / (420 - 380);
+      } else if (wavelength >= 420 && wavelength <= 700) {
+        factor = 1.0;
+      } else if (wavelength > 700 && wavelength <= 750) {
+        factor = 0.3 + (0.7 * (750 - wavelength)) / (750 - 700);
+      }
+
+      const R = Math.round(r * factor * 255);
+      const G = Math.round(g * factor * 255);
+      const B = Math.round(b * factor * 255);
+      return { r: R, g: G, b: B, css: `rgb(${R}, ${G}, ${B})` };
+    }
+
+    function drawLaser(ctx, x1, y1, x2, y2, colorObj) {
+      ctx.save();
+      // Outer Glow
+      ctx.strokeStyle = colorObj.css;
+      ctx.shadowColor = colorObj.css;
+      ctx.shadowBlur = 20;
+      ctx.lineWidth = 6;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+
+      // Inner Core (White highlight)
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawHandSkeleton(ctx, landmarks, colorObj) {
+      const connections = [
+        [0,1],[1,2],[2,3],[3,4],
+        [0,5],[5,6],[6,7],[7,8],
+        [5,9],[9,10],[10,11],[11,12],
+        [9,13],[13,14],[14,15],[15,16],
+        [13,17],[17,18],[18,19],[19,20],[0,17]
+      ];
+
+      ctx.save();
+      ctx.strokeStyle = colorObj.css;
+      ctx.fillStyle = '#ffffff';
+      ctx.lineWidth = 3;
+      ctx.shadowColor = colorObj.css;
+      ctx.shadowBlur = 12;
+
+      // Draw bones
+      connections.forEach(([i, j]) => {
+        const p1 = landmarks[i];
+        const p2 = landmarks[j];
+        ctx.beginPath();
+        ctx.moveTo(p1.x * canvasElement.width, p1.y * canvasElement.height);
+        ctx.lineTo(p2.x * canvasElement.width, p2.y * canvasElement.height);
+        ctx.stroke();
+      });
+
+      // Draw joints
+      landmarks.forEach((p) => {
+        ctx.beginPath();
+        ctx.arc(p.x * canvasElement.width, p.y * canvasElement.height, 4, 0, 2 * Math.PI);
+        ctx.fill();
+      });
+      ctx.restore();
+    }
+
+    function onResults(results) {
+      // Calculate FPS
+      frameCount++;
+      const now = performance.now();
+      if (now - lastFrameTime >= 1000) {
+        fps = Math.round((frameCount * 1000) / (now - lastFrameTime));
+        fpsValEl.innerText = fps;
+        frameCount = 0;
+        lastFrameTime = now;
+      }
+
+      // Resize canvas to match window
+      if (canvasElement.width !== window.innerWidth || canvasElement.height !== window.innerHeight) {
+        canvasElement.width = window.innerWidth;
+        canvasElement.height = window.innerHeight;
+      }
+
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+      
+      // Draw mirrored webcam frame
+      canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+      const detected = results.multiHandLandmarks ? results.multiHandLandmarks.length : 0;
+      handsCountEl.innerText = detected;
+
+      if (detected === 2) {
+        const hand1 = results.multiHandLandmarks[0];
+        const hand2 = results.multiHandLandmarks[1];
+
+        // Centers of palms (using wrist landmark 0)
+        const w1 = hand1[0];
+        const w2 = hand2[0];
+        const dx = (w1.x - w2.x) * canvasElement.width;
+        const dy = (w1.y - w2.y) * canvasElement.height;
+        const distancePx = Math.sqrt(dx * dx + dy * dy);
+
+        // Normalize distance: 50px (touch) to 600px (apart)
+        const minDistance = 60;
+        const maxDistance = 600;
+        const clampedDist = Math.max(minDistance, Math.min(distancePx, maxDistance));
+        const distanceRatio = (clampedDist - minDistance) / (maxDistance - minDistance);
+
+        // Map ratio to visible spectrum (400nm Violet -> 700nm Red)
+        const wavelength = Math.round(400 + distanceRatio * 300);
+        const color = wavelengthToRGB(wavelength);
+
+        // HUD updates
+        hudWavelengthEl.innerText = `${wavelength} nm`;
+        hudDistanceEl.innerText = `${Math.round(distanceRatio * 100)}%`;
+
+        // Check Touch / White Light Explosion
+        if (distancePx < minDistance + 20) {
+          flashOverlay.style.opacity = '0.9';
+        } else {
+          flashOverlay.style.opacity = '0';
+        }
+
+        // Draw skeletons
+        drawHandSkeleton(canvasCtx, hand1, color);
+        drawHandSkeleton(canvasCtx, hand2, color);
+
+        // Draw laser connections between corresponding fingers
+        CONNECT_INDICES.forEach((idx) => {
+          const p1 = hand1[idx];
+          const p2 = hand2[idx];
+          drawLaser(
+            canvasCtx,
+            p1.x * canvasElement.width,
+            p1.y * canvasElement.height,
+            p2.x * canvasElement.width,
+            p2.y * canvasElement.height,
+            color
+          );
+        });
+
+        // Floating wavelength badge centered between wrists
+        // (Inverted X due to mirrored canvas styling)
+        const midXNorm = 1 - (w1.x + w2.x) / 2;
+        const midYNorm = (w1.y + w2.y) / 2;
+        badgeContainer.style.display = 'block';
+        badgeContainer.style.left = `${midXNorm * window.innerWidth}px`;
+        badgeContainer.style.top = `${midYNorm * window.innerHeight}px`;
+        wavelengthBadge.innerText = `${wavelength} nm`;
+        wavelengthBadge.style.borderColor = color.css;
+        wavelengthBadge.style.boxShadow = `0 0 20px ${color.css}`;
+      } else {
+        badgeContainer.style.display = 'none';
+        flashOverlay.style.opacity = '0';
+        hudWavelengthEl.innerText = '--';
+        hudDistanceEl.innerText = '0%';
+
+        if (detected === 1) {
+          const color = wavelengthToRGB(550); // Default emerald glow
+          drawHandSkeleton(canvasCtx, results.multiHandLandmarks[0], color);
+        }
+      }
+
+      canvasCtx.restore();
+    }
+
+    // Initialize MediaPipe Hands
+    const hands = new Hands({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.65,
+      minTrackingConfidence: 0.65
+    });
+
+    hands.onResults(onResults);
+
+    // Initialize Camera
+    const camera = new Camera(videoElement, {
+      onFrame: async () => {
+        await hands.send({ image: videoElement });
+      },
+      width: 1280,
+      height: 720
+    });
+
+    camera.start();
+  </script>
+</body>
+</html>
